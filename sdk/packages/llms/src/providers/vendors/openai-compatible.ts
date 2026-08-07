@@ -281,5 +281,8 @@ export async function createOpenAICompatibleProviderModule(
 		videoModel: vercelGateway
 			? (modelId) => vercelGateway.videoModel(modelId)
 			: undefined,
+		speechModel: vercelGateway
+			? (modelId) => vercelGateway.speechModel(modelId)
+			: undefined,
 	};
 }
