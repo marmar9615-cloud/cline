@@ -342,6 +342,24 @@ export function ChatInputBar({
 	const [promptInput, setPromptInputState] = useState(promptDraft.value);
 	const promptInputValueRef = useRef(promptDraft.value);
 	const appliedDraftVersionRef = useRef(promptDraft.version);
+	const latestDraftVersionRef = useRef(promptDraft.version);
+	latestDraftVersionRef.current = promptDraft.version;
+	const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+	const batchTranscriptSessionRef = useRef<{
+		start: number;
+		end: number;
+		expectedValue: string;
+		draftVersion: number;
+		generation: number;
+	} | null>(null);
+	const streamingTranscriptRangeRef = useRef<{
+		start: number;
+		end: number;
+		expectedValue: string;
+	} | null>(null);
+	const transcriptionGenerationRef = useRef(0);
+	const transcriptionTargetIdentityRef = useRef("unconfigured");
+	const transcriptionTargetStreamsRef = useRef(false);
 	const setPromptInput = useCallback(
 		(value: string) => {
 			promptInputValueRef.current = value;
@@ -355,6 +373,7 @@ export function ChatInputBar({
 			return;
 		}
 		appliedDraftVersionRef.current = promptDraft.version;
+		batchTranscriptSessionRef.current = null;
 		setPromptInput(promptDraft.value);
 	}, [promptDraft, setPromptInput]);
 	const isBusy =
@@ -362,6 +381,7 @@ export function ChatInputBar({
 	const canAbort = status === "running" || status === "stopping";
 	const hasDraft = promptInput.trim().length > 0 || attachments.length > 0;
 	const [speechInputActive, setSpeechInputActive] = useState(false);
+	const speechInputActiveRef = useRef(false);
 	const [speechInputProcessing, setSpeechInputProcessing] = useState(false);
 
 	const [reasoningCapability, setReasoningCapability] = useState<{
@@ -397,14 +417,6 @@ export function ChatInputBar({
 		onSend(prompt);
 	}, [onSend, promptInput, setPromptInput, speechInputActive]);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
-	const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
-	const streamingTranscriptRangeRef = useRef<{
-		start: number;
-		end: number;
-		expectedValue: string;
-	} | null>(null);
-	const transcriptionGenerationRef = useRef(0);
-	const transcriptionTargetIdentityRef = useRef("unconfigured");
 	const [transcriptionTarget, setTranscriptionTarget] =
 		useState<TranscriptionModelTarget | null>(null);
 	const updateTranscriptionTarget = useCallback(
@@ -412,9 +424,12 @@ export function ChatInputBar({
 			const identity = target
 				? `${target.providerId}:${target.modelId}:${target.supportsStreaming ? "streaming" : "media-recorder"}`
 				: "unconfigured";
+			transcriptionTargetStreamsRef.current =
+				target?.supportsStreaming ?? false;
 			if (identity !== transcriptionTargetIdentityRef.current) {
 				transcriptionTargetIdentityRef.current = identity;
 				transcriptionGenerationRef.current += 1;
+				batchTranscriptSessionRef.current = null;
 				streamingTranscriptRangeRef.current = null;
 			}
 			setTranscriptionTarget(target);
@@ -493,12 +508,22 @@ export function ChatInputBar({
 	const handleTranscriptionChange = useCallback(
 		(transcript: string) => {
 			const text = transcript.trim();
-			if (!text) return;
+			const session = batchTranscriptSessionRef.current;
+			// A batch result belongs to exactly one recording session. Consume the
+			// snapshot even when the result is stale so it cannot be replayed later.
+			batchTranscriptSessionRef.current = null;
+			if (!text || !session) return;
 
 			const current = promptInputValueRef.current;
-			const input = promptInputRef.current;
-			const insertionStart = input?.selectionStart ?? current.length;
-			const insertionEnd = input?.selectionEnd ?? insertionStart;
+			if (
+				session.generation !== transcriptionGenerationRef.current ||
+				session.draftVersion !== latestDraftVersionRef.current ||
+				session.expectedValue !== current
+			) {
+				return;
+			}
+			const insertionStart = session.start;
+			const insertionEnd = session.end;
 			const before = current.slice(0, insertionStart);
 			const after = current.slice(insertionEnd);
 			const leadingSpace = before.length > 0 && !/\s$/.test(before) ? " " : "";
@@ -517,6 +542,30 @@ export function ChatInputBar({
 		},
 		[setPromptInput],
 	);
+
+	const handleSpeechInputActiveChange = useCallback((active: boolean) => {
+		const wasActive = speechInputActiveRef.current;
+		speechInputActiveRef.current = active;
+		setSpeechInputActive(active);
+
+		if (!active) {
+			batchTranscriptSessionRef.current = null;
+			return;
+		}
+		if (wasActive || transcriptionTargetStreamsRef.current) return;
+
+		const current = promptInputValueRef.current;
+		const input = promptInputRef.current;
+		const start = input?.selectionStart ?? current.length;
+		const end = input?.selectionEnd ?? start;
+		batchTranscriptSessionRef.current = {
+			start,
+			end,
+			expectedValue: current,
+			draftVersion: latestDraftVersionRef.current,
+			generation: transcriptionGenerationRef.current,
+		};
+	}, []);
 
 	const handleStreamingTranscriptionStart = useCallback(() => {
 		const current = promptInputValueRef.current;
@@ -1130,7 +1179,7 @@ export function ChatInputBar({
 										? `${transcriptionTarget.providerId}:${transcriptionTarget.modelId}:${transcriptionTarget.supportsStreaming ? "streaming" : "media-recorder"}`
 										: "unconfigured"
 								}
-								onActiveChange={setSpeechInputActive}
+								onActiveChange={handleSpeechInputActiveChange}
 								onAudioRecorded={handleAudioRecorded}
 								onClick={(event) => {
 									if (!transcriptionTarget) {
