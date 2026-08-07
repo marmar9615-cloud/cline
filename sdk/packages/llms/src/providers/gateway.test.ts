@@ -3642,18 +3642,25 @@ describe("sdk-gateway", () => {
 			modelId: "qwen/qwen3.6-plus",
 			providerOptionsKey: "cline",
 			aliasKey: undefined,
+			// Unlisted on the cline catalog: the high-effort request rides the
+			// portable top-level reasoning option, no provider options.
+			expectedReasoning: undefined,
 		},
 		{
 			providerId: "vercel-ai-gateway",
 			modelId: "alibaba/qwen3.6-plus",
 			providerOptionsKey: "vercel-ai-gateway",
 			aliasKey: "vercelAiGateway",
+			// models.dev advertises toggle + budget_tokens controls, so the
+			// high-effort request is translated into a derived token budget.
+			expectedReasoning: { max_tokens: 25_600 },
 		},
 	])("forwards Qwen prompt cache controls without Anthropic reasoning for $providerId", async ({
 		providerId,
 		modelId,
 		providerOptionsKey,
 		aliasKey,
+		expectedReasoning,
 	}) => {
 		streamTextSpy.mockReturnValue({
 			fullStream: makeStreamParts([
@@ -3722,13 +3729,17 @@ describe("sdk-gateway", () => {
 				expect.objectContaining(expectedCacheControl),
 			);
 		}
-		// Portable effort rides the top-level reasoning option, so no
-		// reasoning provider options are forwarded for either provider.
-		expect(qwenCall.providerOptions?.[providerOptionsKey]).not.toEqual(
-			expect.objectContaining({
-				reasoning: expect.anything(),
-			}),
-		);
+		if (expectedReasoning) {
+			expect(qwenCall.providerOptions?.[providerOptionsKey]).toEqual(
+				expect.objectContaining({ reasoning: expectedReasoning }),
+			);
+		} else {
+			expect(qwenCall.providerOptions?.[providerOptionsKey]).not.toEqual(
+				expect.objectContaining({
+					reasoning: expect.anything(),
+				}),
+			);
+		}
 		expect(qwenCall.providerOptions?.[providerOptionsKey]).not.toEqual(
 			expect.objectContaining({
 				thinking: expect.anything(),
@@ -4040,16 +4051,16 @@ describe("sdk-gateway", () => {
 			}),
 		);
 
-		// Explicit enablement rides the portable top-level reasoning option.
-		expect(streamTextSpy).toHaveBeenNthCalledWith(
-			1,
-			expect.objectContaining({
-				reasoning: "medium",
-			}),
-		);
 		// The openrouter catalog advertises an explicitly empty
 		// reasoning_options list for z-ai/glm-4.7 ("no user-facing control"),
-		// so no reasoning provider options are forwarded either way.
+		// so neither the portable top-level option nor reasoning provider
+		// options are forwarded.
+		{
+			const call = streamTextSpy.mock.calls[0]?.[0] as {
+				reasoning?: unknown;
+			};
+			expect(call).not.toHaveProperty("reasoning");
+		}
 		for (const callIndex of [0, 1]) {
 			const call = streamTextSpy.mock.calls[callIndex]?.[0] as {
 				providerOptions?: Record<string, Record<string, unknown> | undefined>;

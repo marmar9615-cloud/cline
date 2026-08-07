@@ -2,6 +2,7 @@ import type {
 	GatewayProviderContext,
 	GatewayStreamRequest,
 } from "@cline/shared";
+import type { AiSdkReasoning } from "./portable-reasoning";
 import type { ProviderOptionsPatch } from "./utils";
 
 export type AiSdkProviderOptionsTarget =
@@ -29,6 +30,13 @@ export type ProviderOptionMatchInput = {
 	context: GatewayProviderContext;
 	providerOptionsKey: string;
 	target: AiSdkProviderOptionsTarget;
+	/**
+	 * The value the request resolved to on the AI SDK's portable top-level
+	 * reasoning option, when it did. The reasoning intent is removed from
+	 * `request` in that case, so rules that must complement the portable
+	 * setting (rather than encode intent themselves) key off this field.
+	 */
+	portableReasoning?: AiSdkReasoning;
 };
 
 export type ProviderOptionBuildInput = ProviderOptionMatchInput & {

@@ -2,6 +2,7 @@ import type {
 	GatewayProviderContext,
 	GatewayStreamRequest,
 } from "@cline/shared";
+import { getModelReasoningControls } from "../model-facts";
 import {
 	buildAnthropicCompatibleReasoningOptions,
 	resolveAnthropicReasoningRequestPolicy,
@@ -46,6 +47,33 @@ function buildCompatibleThinkingOptions(options: {
 	return { thinking: { type: "adaptive" } };
 }
 
+/**
+ * Models advertising a models.dev "default" effort take the provider's own
+ * default when reasoning is enabled without a specific level. The portable
+ * scale cannot express "default", so this stays a native wire option.
+ */
+function buildCompatibleDefaultEffortOptions(options: {
+	request: GatewayStreamRequest;
+	context: GatewayProviderContext;
+	suppressions: ProviderOptionSuppression;
+}): Record<string, unknown> {
+	const { request, context, suppressions } = options;
+	const reasoning = request.reasoning;
+	if (
+		suppressions.genericThinking ||
+		reasoning?.enabled !== true ||
+		reasoning.effort !== undefined ||
+		typeof reasoning.budgetTokens === "number" ||
+		resolveReasoningRoute(request, context) !== undefined
+	) {
+		return {};
+	}
+	return getModelReasoningControls(context.model.reasoningOptions)
+		?.supportsDefault
+		? { reasoningEffort: "default" }
+		: {};
+}
+
 export function buildCompatibleProviderOptions(options: {
 	request: GatewayStreamRequest;
 	context: GatewayProviderContext;
@@ -60,6 +88,7 @@ export function buildCompatibleProviderOptions(options: {
 	return {
 		...(target === "openai-compatible" ? { strictJsonSchema: false } : {}),
 		...buildCompatibleThinkingOptions({ request, context, suppressions }),
+		...buildCompatibleDefaultEffortOptions({ request, context, suppressions }),
 		...(reasoning ? { reasoning } : {}),
 		...promptCache,
 		...(["openai", "openai-native"].includes(request.providerId)

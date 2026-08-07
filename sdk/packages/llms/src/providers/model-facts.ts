@@ -285,6 +285,13 @@ export function isOpenAIReasoningEraModelId(
 	);
 }
 
+export function isGeminiModel(input: {
+	request: Pick<GatewayStreamRequest, "modelId">;
+	context: GatewayProviderContext;
+}): boolean {
+	return /(^|[/\s])gemini([-.\d]|$)/.test(geminiModelDescriptor(input));
+}
+
 export function resolveGeminiThinkingMode(input: {
 	request: Pick<GatewayStreamRequest, "modelId">;
 	context: GatewayProviderContext;

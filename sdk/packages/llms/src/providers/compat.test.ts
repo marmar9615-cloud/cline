@@ -425,9 +425,12 @@ describe("createGatewayApiHandler.createMessage", () => {
 			// Drain the stream so the provider request is executed.
 		}
 
+		// Unlisted models only get broadly supported effort values, so the
+		// exotic "max" request is clamped to "high" before the portable
+		// mapping.
 		expect(streamTextSpy).toHaveBeenCalledWith(
 			expect.objectContaining({
-				reasoning: "xhigh",
+				reasoning: "high",
 			}),
 		);
 	});

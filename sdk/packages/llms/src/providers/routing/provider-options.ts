@@ -4,7 +4,10 @@ import type {
 } from "@cline/shared";
 import { buildAnthropicProviderOptions } from "./anthropic-compatible";
 import { buildCompatibleProviderOptions } from "./generic-compatible";
-import { withoutPortableReasoning } from "./portable-reasoning";
+import {
+	resolvePortableReasoning,
+	withoutPortableReasoning,
+} from "./portable-reasoning";
 import {
 	buildProviderOptionRulePatches,
 	matchProviderOptionRules,
@@ -73,8 +76,9 @@ export function composeAiSdkProviderOptions(
 		request.providerId,
 	),
 ): Record<string, unknown> {
+	const portableReasoning = resolvePortableReasoning(request, context);
 	const normalizedRequest = normalizeReasoningRequest(
-		withoutPortableReasoning(request),
+		withoutPortableReasoning(request, context),
 		context,
 	);
 	const providerOptionsKey = toProviderOptionsKey(normalizedRequest.providerId);
@@ -83,6 +87,7 @@ export function composeAiSdkProviderOptions(
 		context,
 		providerOptionsKey,
 		target,
+		portableReasoning,
 	};
 	const matchedRules = matchProviderOptionRules(
 		PROVIDER_OPTION_RULES,

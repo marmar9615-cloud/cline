@@ -7,7 +7,10 @@ import { describe, expect, it } from "vitest";
 import { BEDROCK_ROUTING_METADATA } from "./bedrock-cache-point";
 import { GLM_THINKING_ROUTING_METADATA } from "./glm-thinking";
 import { MINIMAX_THINKING_ROUTING_METADATA } from "./minimax-thinking";
-import { resolvePortableReasoning } from "./portable-reasoning";
+import {
+	type AiSdkReasoning,
+	resolvePortableReasoning,
+} from "./portable-reasoning";
 import {
 	composeAiSdkProviderOptions,
 	mergeProviderOptionPatches,
@@ -152,51 +155,34 @@ type Case = {
 	name: string;
 	request: RequestOverrides;
 	context?: ContextOverrides;
+	/**
+	 * The value the request must resolve to on the AI SDK's portable
+	 * top-level reasoning option. Asserted for every case: entries whose
+	 * reasoning intent rides the portable channel document it here instead
+	 * of a provider-option expectation, and everything else must resolve to
+	 * `undefined` so intent cannot silently leak out of provider options.
+	 */
+	portable?: AiSdkReasoning;
 	expect: BucketExpectation[];
 };
 
 function runCases(cases: ReadonlyArray<Case>) {
-	it.each(cases)("$name", ({ request, context, expect: expectations }) => {
+	it.each(cases)("$name", ({
+		request,
+		context,
+		portable,
+		expect: expectations,
+	}) => {
 		const gatewayRequest = makeRequest(request);
-		const result = composeAiSdkProviderOptions(
-			gatewayRequest,
-			makeContext({
-				providerId: request.providerId,
-				modelId: request.modelId,
-				...context,
-			}),
+		const gatewayContext = makeContext({
+			providerId: request.providerId,
+			modelId: request.modelId,
+			...context,
+		});
+		const result = composeAiSdkProviderOptions(gatewayRequest, gatewayContext);
+		expect(resolvePortableReasoning(gatewayRequest, gatewayContext)).toBe(
+			portable,
 		);
-		if (resolvePortableReasoning(gatewayRequest)) {
-			for (const bucket of Object.values(result)) {
-				for (const key of [
-					"effort",
-					"reasoning",
-					"reasoningEffort",
-					"think",
-					"thinking",
-					"thinkingConfig",
-				]) {
-					expect(bucket).not.toHaveProperty(key);
-				}
-			}
-			return;
-		}
-		if (request.providerId === "ollama") {
-			expect(result.ollama).toHaveProperty("options.num_ctx");
-			expect(result.ollama).not.toHaveProperty("think");
-			return;
-		}
-		if (
-			request.modelId.includes("kimi-k2.6") &&
-			(request.reasoning === undefined ||
-				Object.keys(request.reasoning).length === 0)
-		) {
-			for (const bucket of Object.values(result)) {
-				expect(bucket).not.toHaveProperty("thinking");
-			}
-			return;
-		}
-
 		for (const e of expectations) {
 			const bucket = result[e.bucket];
 			if (e.has) {
@@ -377,7 +363,10 @@ describe("composeAiSdkProviderOptions: Anthropic thinking precedence", () => {
 			],
 		},
 		{
-			name: "Opus 4.6 clamps unsupported xhigh effort to max",
+			// Catalog clamp turns xhigh into max; the portable scale spells
+			// max as xhigh and @ai-sdk/anthropic maps it onto the model's
+			// strongest supported effort.
+			name: "Opus 4.6 clamps unsupported xhigh effort via portable reasoning",
 			request: {
 				providerId: "anthropic",
 				modelId: "claude-opus-4-6",
@@ -387,15 +376,11 @@ describe("composeAiSdkProviderOptions: Anthropic thinking precedence", () => {
 				family: "claude-opus",
 				reasoningOptions: effortOptions(["low", "medium", "high", "max"]),
 			},
-			expect: [
-				{
-					bucket: "anthropic",
-					has: { thinking: ADAPTIVE_THINKING, effort: "max" },
-				},
-			],
+			portable: "xhigh",
+			expect: [{ bucket: "anthropic", lacks: ["thinking", "effort"] }],
 		},
 		{
-			name: "Fable 5 uses adaptive thinking and preserves xhigh effort",
+			name: "Fable 5 routes xhigh effort through portable reasoning",
 			request: {
 				providerId: "anthropic",
 				modelId: "claude-fable-5",
@@ -411,15 +396,11 @@ describe("composeAiSdkProviderOptions: Anthropic thinking precedence", () => {
 					"max",
 				]),
 			},
-			expect: [
-				{
-					bucket: "anthropic",
-					has: { thinking: ADAPTIVE_THINKING, effort: "xhigh" },
-				},
-			],
+			portable: "xhigh",
+			expect: [{ bucket: "anthropic", lacks: ["thinking", "effort"] }],
 		},
 		{
-			name: "Sonnet 5 emits the explicit disabled thinking control",
+			name: "Sonnet 5 routes explicit disable through portable reasoning",
 			request: {
 				providerId: "anthropic",
 				modelId: "claude-sonnet-5",
@@ -432,13 +413,8 @@ describe("composeAiSdkProviderOptions: Anthropic thinking precedence", () => {
 					...effortOptions(["low", "medium", "high", "xhigh", "max"]),
 				],
 			},
-			expect: [
-				{
-					bucket: "anthropic",
-					has: { thinking: { type: "disabled" } },
-					lacks: ["effort"],
-				},
-			],
+			portable: "none",
+			expect: [{ bucket: "anthropic", lacks: ["thinking", "effort"] }],
 		},
 		{
 			// Adaptive-era models reject the manual wire shape even though they
@@ -485,65 +461,53 @@ describe("composeAiSdkProviderOptions: Anthropic thinking precedence", () => {
 			],
 		},
 		{
-			// Adaptive-era ids (4.6+ / 5.x) reject thinking.type "enabled", so
-			// the missing-reasoningOptions fallback must infer adaptive.
 			// Unlisted ids still get only broadly supported effort values, so
-			// xhigh is downgraded to high.
-			name: "unknown future Claude aliases without catalog options infer adaptive thinking",
+			// xhigh is downgraded to high before the portable mapping;
+			// @ai-sdk/anthropic infers adaptive vs manual thinking itself.
+			name: "unknown future Claude aliases without catalog options clamp effort portably",
 			request: {
 				providerId: "anthropic",
 				modelId: "claude-haiku-5",
 				reasoning: { enabled: true, effort: "xhigh" },
 			},
 			context: { family: "claude-haiku" },
-			expect: [
-				{
-					bucket: "anthropic",
-					has: { thinking: ADAPTIVE_THINKING, effort: "high" },
-				},
-			],
+			portable: "high",
+			expect: [{ bucket: "anthropic", lacks: ["thinking", "effort"] }],
 		},
 		{
-			name: "unlisted adaptive-era suffix variant without catalog options infers adaptive thinking",
+			name: "unlisted adaptive-era suffix variant routes enablement portably",
 			request: {
 				providerId: "anthropic",
 				modelId: "claude-opus-4-6:1m",
 				reasoning: { enabled: true },
 			},
 			context: { family: "claude-opus" },
-			expect: [
-				{
-					bucket: "anthropic",
-					has: { thinking: ADAPTIVE_THINKING },
-					lacks: ["effort"],
-				},
-			],
+			portable: "medium",
+			expect: [{ bucket: "anthropic", lacks: ["thinking", "effort"] }],
 		},
 		{
-			name: "pre-adaptive Claude ids without catalog options keep manual thinking",
+			// @ai-sdk/anthropic derives the manual budget for pre-adaptive
+			// ids from the portable level.
+			name: "pre-adaptive Claude ids without catalog options route enablement portably",
 			request: {
 				providerId: "anthropic",
 				modelId: "claude-sonnet-4-5-20250929",
 				reasoning: { enabled: true },
 			},
 			context: { family: "claude-sonnet" },
-			expect: [
-				{
-					bucket: "anthropic",
-					has: { thinking: MANUAL_THINKING },
-					lacks: ["effort"],
-				},
-			],
+			portable: "medium",
+			expect: [{ bucket: "anthropic", lacks: ["thinking", "effort"] }],
 		},
 		{
-			name: "manual thinking budget defaults when only reasoning.enabled is set",
+			name: "bare enablement without catalog options rides portable reasoning",
 			request: {
 				providerId: "anthropic",
 				modelId: "claude-sonnet-4-5",
 				reasoning: { enabled: true },
 			},
 			context: { family: "claude-sonnet" },
-			expect: [{ bucket: "anthropic", has: { thinking: MANUAL_THINKING } }],
+			portable: "medium",
+			expect: [{ bucket: "anthropic", lacks: ["thinking", "effort"] }],
 		},
 		{
 			name: "lower non-reasoning Sonnet 3.5 -> no thinking on either bucket",
@@ -578,23 +542,18 @@ describe("composeAiSdkProviderOptions: Anthropic thinking precedence", () => {
 			],
 		},
 		{
-			name: "Cline-routed Sonnet 4.5 -> gateway reasoning, no thinking, no effort",
+			name: "Cline-routed Sonnet 4.5 -> portable effort, no gateway reasoning object",
 			request: {
 				providerId: "cline",
 				modelId: "anthropic/claude-sonnet-4-5",
 				reasoning: { enabled: true, effort: "low" },
 			},
 			context: { family: "claude-sonnet" },
-			expect: [
-				{
-					bucket: "cline",
-					has: { reasoning: { enabled: true, max_tokens: 1024 } },
-					lacks: ["thinking"],
-				},
-			],
+			portable: "low",
+			expect: [{ bucket: "cline", lacks: ["thinking", "reasoning"] }],
 		},
 		{
-			name: "legacy custom Claude with promptCacheStrategy -> Anthropic reasoning",
+			name: "legacy custom Claude with promptCacheStrategy -> portable effort",
 			request: {
 				providerId: "custom-provider",
 				modelId: "anthropic/claude-sonnet-4-5",
@@ -604,21 +563,32 @@ describe("composeAiSdkProviderOptions: Anthropic thinking precedence", () => {
 				disableAutoAnthropicRouting: true,
 				metadata: { promptCacheStrategy: "anthropic-automatic" },
 			},
+			portable: "high",
 			expect: [
 				{
 					bucket: "custom-provider",
-					has: { reasoning: { enabled: true, max_tokens: 1024 } },
-					lacks: ["thinking", "effort", "reasoningEffort", "reasoningSummary"],
+					lacks: [
+						"thinking",
+						"effort",
+						"reasoning",
+						"reasoningEffort",
+						"reasoningSummary",
+					],
 				},
 				{
 					bucket: "openaiCompatible",
-					has: { reasoning: { enabled: true, max_tokens: 1024 } },
-					lacks: ["thinking", "effort", "reasoningEffort", "reasoningSummary"],
+					lacks: [
+						"thinking",
+						"effort",
+						"reasoning",
+						"reasoningEffort",
+						"reasoningSummary",
+					],
 				},
 			],
 		},
 		{
-			name: "unrouted custom Claude -> Anthropic reasoning",
+			name: "unrouted custom Claude -> portable effort",
 			request: {
 				providerId: "custom-provider",
 				modelId: "anthropic/claude-3.5-sonnet",
@@ -627,16 +597,27 @@ describe("composeAiSdkProviderOptions: Anthropic thinking precedence", () => {
 			context: {
 				disableAutoAnthropicRouting: true,
 			},
+			portable: "high",
 			expect: [
 				{
 					bucket: "custom-provider",
-					has: { reasoning: { enabled: true, max_tokens: 1024 } },
-					lacks: ["thinking", "effort", "reasoningEffort", "reasoningSummary"],
+					lacks: [
+						"thinking",
+						"effort",
+						"reasoning",
+						"reasoningEffort",
+						"reasoningSummary",
+					],
 				},
 				{
 					bucket: "openaiCompatible",
-					has: { reasoning: { enabled: true, max_tokens: 1024 } },
-					lacks: ["thinking", "effort", "reasoningEffort", "reasoningSummary"],
+					lacks: [
+						"thinking",
+						"effort",
+						"reasoning",
+						"reasoningEffort",
+						"reasoningSummary",
+					],
 				},
 			],
 		},
@@ -729,7 +710,8 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "openrouter preserves exact maximum reasoning effort",
+			// The portable scale spells the advertised "max" as xhigh.
+			name: "openrouter routes catalog maximum effort through portable reasoning",
 			request: {
 				providerId: "openrouter",
 				modelId: "moonshotai/reasoning-model",
@@ -738,11 +720,11 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			context: {
 				reasoningOptions: effortOptions(["low", "medium", "high", "max"]),
 			},
+			portable: "xhigh",
 			expect: [
 				{
 					bucket: "openrouter",
-					has: { reasoning: { effort: "max" } },
-					lacks: ["thinking", "effort", "reasoningEffort"],
+					lacks: ["thinking", "reasoning", "effort", "reasoningEffort"],
 				},
 				{
 					bucket: "openaiCompatible",
@@ -751,7 +733,7 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "openrouter preserves supported Anthropic xhigh effort",
+			name: "openrouter routes supported Anthropic xhigh effort portably",
 			request: {
 				providerId: "openrouter",
 				modelId: "anthropic/claude-opus-4-7",
@@ -767,26 +749,26 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 					"max",
 				]),
 			},
+			portable: "xhigh",
 			expect: [
 				{
 					bucket: "openrouter",
-					has: { reasoning: { effort: "xhigh" } },
-					lacks: ["thinking", "reasoningEffort"],
+					lacks: ["thinking", "reasoning", "reasoningEffort"],
 				},
 			],
 		},
 		{
-			name: "openrouter reasoning enabled-only -> reasoning.enabled",
+			name: "openrouter reasoning enabled-only rides portable reasoning",
 			request: {
 				providerId: "openrouter",
 				modelId: "openai/gpt-oss-120b",
 				reasoning: { enabled: true },
 			},
+			portable: "medium",
 			expect: [
 				{
 					bucket: "openrouter",
-					has: { reasoning: { enabled: true, max_tokens: 19_200 } },
-					lacks: ["thinking", "effort", "reasoningEffort"],
+					lacks: ["thinking", "reasoning", "effort", "reasoningEffort"],
 				},
 				{
 					bucket: "openaiCompatible",
@@ -814,7 +796,9 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "Anthropic default effort uses adaptive thinking without an invalid effort",
+			// The models.dev "default" effort has no portable equivalent and no
+			// Anthropic wire shape; the model's own default thinking applies.
+			name: "Anthropic default effort leaves the model default in charge",
 			request: {
 				providerId: "anthropic",
 				modelId: "claude-future",
@@ -827,24 +811,23 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			expect: [
 				{
 					bucket: "anthropic",
-					has: { thinking: { type: "adaptive" } },
-					lacks: ["effort", "reasoningEffort"],
+					lacks: ["thinking", "effort", "reasoningEffort"],
 				},
 			],
 		},
 		{
-			name: "openrouter reasoning enabled-only uses resolved output cap for reasoning budget",
+			name: "openrouter reasoning enabled-only with a request cap rides portable reasoning",
 			request: {
 				providerId: "openrouter",
 				modelId: "openai/gpt-oss-120b",
 				maxTokens: 10_000,
 				reasoning: { enabled: true },
 			},
+			portable: "medium",
 			expect: [
 				{
 					bucket: "openrouter",
-					has: { reasoning: { enabled: true, max_tokens: 6_000 } },
-					lacks: ["thinking", "effort", "reasoningEffort"],
+					lacks: ["thinking", "reasoning", "effort", "reasoningEffort"],
 				},
 				{
 					bucket: "openaiCompatible",
@@ -853,18 +836,18 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "openrouter reasoning enabled-only uses model output cap when request cap is absent",
+			name: "openrouter reasoning enabled-only with a model cap rides portable reasoning",
 			request: {
 				providerId: "openrouter",
 				modelId: "openai/gpt-oss-120b",
 				reasoning: { enabled: true },
 			},
 			context: { maxOutputTokens: 12_000 },
+			portable: "medium",
 			expect: [
 				{
 					bucket: "openrouter",
-					has: { reasoning: { enabled: true, max_tokens: 7_200 } },
-					lacks: ["thinking", "effort", "reasoningEffort"],
+					lacks: ["thinking", "reasoning", "effort", "reasoningEffort"],
 				},
 				{
 					bucket: "openaiCompatible",
@@ -873,17 +856,17 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "openrouter reasoning effort sends only effort (no max_tokens, which OpenRouter rejects alongside effort)",
+			name: "openrouter reasoning effort rides portable reasoning",
 			request: {
 				providerId: "openrouter",
 				modelId: "openai/gpt-oss-120b",
 				reasoning: { effort: "high" },
 			},
+			portable: "high",
 			expect: [
 				{
 					bucket: "openrouter",
-					has: { reasoning: { effort: "high" } },
-					lacks: ["thinking", "reasoningEffort"],
+					lacks: ["thinking", "reasoning", "reasoningEffort"],
 				},
 				{
 					bucket: "openaiCompatible",
@@ -933,22 +916,21 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 		},
 		// GLM/Z.AI routed reasoning — enabled
 		{
-			name: "openrouter GLM thinking-enabled -> routed reasoning, no thinking leak",
+			name: "openrouter GLM thinking-enabled rides portable reasoning, no thinking leak",
 			request: {
 				providerId: "openrouter",
 				modelId: "z-ai/glm-4.7",
 				reasoning: { enabled: true },
 			},
+			portable: "medium",
 			expect: [
 				{
 					bucket: "openrouter",
-					has: { reasoning: { enabled: true, max_tokens: 19_200 } },
-					lacks: ["thinking"],
+					lacks: ["thinking", "reasoning"],
 				},
 				{
 					bucket: "openaiCompatible",
-					has: { reasoning: { enabled: true } },
-					lacks: ["thinking"],
+					lacks: ["thinking", "reasoning"],
 				},
 			],
 		},
@@ -973,44 +955,42 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "openrouter GLM effort -> OpenRouter effort is not overwritten by routed GLM",
+			name: "openrouter GLM effort rides portable reasoning",
 			request: {
 				providerId: "openrouter",
 				modelId: "z-ai/glm-4.7",
 				reasoning: { enabled: true, effort: "medium" },
 			},
+			portable: "medium",
 			expect: [
 				{
 					bucket: "openrouter",
-					has: { reasoning: { effort: "medium" } },
-					lacks: ["thinking"],
+					lacks: ["thinking", "reasoning"],
 				},
 				{
 					bucket: "openaiCompatible",
-					has: { reasoning: { enabled: true } },
-					lacks: ["thinking"],
+					lacks: ["thinking", "reasoning"],
 				},
 			],
 		},
 		{
-			name: "vercel-ai-gateway GLM thinking-enabled -> provider+alias buckets, no thinking leak",
+			name: "vercel-ai-gateway GLM thinking-enabled rides portable reasoning, no thinking leak",
 			request: {
 				providerId: "vercel-ai-gateway",
 				modelId: "z-ai/glm-4.7",
 				reasoning: { enabled: true },
 			},
+			portable: "medium",
 			expect: [
 				{
 					bucket: "vercel-ai-gateway",
-					has: { reasoning: { enabled: true } },
-					lacks: ["thinking"],
+					lacks: ["thinking", "reasoning"],
 				},
 				{
 					bucket: "vercelAiGateway",
-					has: { reasoning: { enabled: true } },
-					lacks: ["thinking"],
+					lacks: ["thinking", "reasoning"],
 				},
-				{ bucket: "openaiCompatible", lacks: ["thinking"] },
+				{ bucket: "openaiCompatible", lacks: ["thinking", "reasoning"] },
 			],
 		},
 		// GLM/Z.AI routed reasoning — disabled
@@ -1060,21 +1040,22 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 				},
 			],
 		},
-		// Native Z.AI uses a real thinking shape, not the routed reasoning shape
+		// Native Z.AI enablement rides portable reasoning; explicit disable
+		// keeps the native thinking shape (see the disable cases).
 		{
-			name: "native zai thinking -> thinking.type=enabled, no routed reasoning",
+			name: "native zai thinking-enabled rides portable reasoning",
 			request: {
 				providerId: "zai",
 				modelId: "glm-4.7",
 				reasoning: { enabled: true },
 			},
 			context: { family: "glm", metadata: GLM_THINKING_ROUTING_METADATA },
+			portable: "medium",
 			expect: [
-				{ bucket: "zai", has: { thinking: { type: "enabled" } } },
+				{ bucket: "zai", lacks: ["thinking", "reasoning"] },
 				{
 					bucket: "openaiCompatible",
-					has: { thinking: { type: "enabled" } },
-					lacks: ["reasoning"],
+					lacks: ["thinking", "reasoning"],
 				},
 			],
 		},
@@ -1086,6 +1067,7 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 				reasoning: { enabled: true },
 			},
 			context: { family: "other", metadata: GLM_THINKING_ROUTING_METADATA },
+			portable: "medium",
 			expect: [
 				{ bucket: "zai", lacks: ["thinking", "reasoning"] },
 				{ bucket: "openaiCompatible", lacks: ["thinking", "reasoning"] },
@@ -1109,16 +1091,19 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "cline Kimi K2.6 family reasoning.enabled=true -> thinking.type=enabled",
+			// K2.6 thinks by default; explicit enablement rides portable
+			// reasoning instead of the native thinking toggle.
+			name: "cline Kimi K2.6 family reasoning.enabled=true rides portable reasoning",
 			request: {
 				providerId: "cline",
 				modelId: "moonshotai/kimi-k2.6",
 				reasoning: { enabled: true },
 			},
 			context: { family: "kimi-k2.6" },
+			portable: "medium",
 			expect: [
-				{ bucket: "cline", has: { thinking: { type: "enabled" } } },
-				{ bucket: "openaiCompatible", has: { thinking: { type: "enabled" } } },
+				{ bucket: "cline", lacks: ["thinking"] },
+				{ bucket: "openaiCompatible", lacks: ["thinking"] },
 			],
 		},
 		{
@@ -1180,15 +1165,16 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "openai-compatible Kimi K2.6 family unset reasoning -> thinking.type=enabled",
+			// No explicit intent leaves K2.6's default-on thinking untouched.
+			name: "openai-compatible Kimi K2.6 family unset reasoning -> no thinking toggle",
 			request: { providerId: "openai-compatible", modelId: "kimi-k2.6" },
 			context: { family: "kimi-k2.6" },
 			expect: [
 				{
 					bucket: "openai-compatible",
-					has: { thinking: { type: "enabled" } },
+					lacks: ["thinking"],
 				},
-				{ bucket: "openaiCompatible", has: { thinking: { type: "enabled" } } },
+				{ bucket: "openaiCompatible", lacks: ["thinking"] },
 			],
 		},
 		{
@@ -1211,16 +1197,14 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "openai-compatible Kimi K2.6 family empty reasoning -> thinking.type=enabled",
+			name: "openai-compatible Kimi K2.6 family empty reasoning -> no thinking toggle",
 			request: {
 				providerId: "openai-compatible",
 				modelId: "kimi-k2.6",
 				reasoning: {},
 			},
 			context: { family: "kimi-k2.6" },
-			expect: [
-				{ bucket: "openaiCompatible", has: { thinking: { type: "enabled" } } },
-			],
+			expect: [{ bucket: "openaiCompatible", lacks: ["thinking"] }],
 		},
 		{
 			name: "qwen prompt-cache-only route reasoning.enabled=true -> cache control, no thinking",
@@ -1348,6 +1332,7 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
+			portable: "high",
 			name: "cline unregistered qwen reasoning.enabled=true -> no gateway reasoning",
 			request: {
 				providerId: "cline",
@@ -1506,15 +1491,16 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "direct deepseek reasoning enable -> thinking.type=enabled",
+			name: "direct deepseek reasoning enable rides portable reasoning",
 			request: {
 				providerId: "deepseek",
 				modelId: "deepseek-v4-pro",
 				reasoning: { enabled: true },
 			},
+			portable: "medium",
 			expect: [
-				{ bucket: "deepseek", has: { thinking: { type: "enabled" } } },
-				{ bucket: "openaiCompatible", has: { thinking: { type: "enabled" } } },
+				{ bucket: "deepseek", lacks: ["thinking"] },
+				{ bucket: "openaiCompatible", lacks: ["thinking"] },
 			],
 		},
 		{
@@ -1575,19 +1561,17 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "openai-compatible deepseek family reasoning.enabled=true -> thinking.type=enabled",
+			name: "openai-compatible deepseek family reasoning.enabled=true rides portable reasoning",
 			request: {
 				providerId: "openai-compatible",
 				modelId: "deepseek-v4-pro",
 				reasoning: { enabled: true },
 			},
 			context: { family: "deepseek-thinking" },
+			portable: "medium",
 			expect: [
-				{
-					bucket: "openai-compatible",
-					has: { thinking: { type: "enabled" } },
-				},
-				{ bucket: "openaiCompatible", has: { thinking: { type: "enabled" } } },
+				{ bucket: "openai-compatible", lacks: ["thinking"] },
+				{ bucket: "openaiCompatible", lacks: ["thinking"] },
 			],
 		},
 		{
@@ -1600,7 +1584,7 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "openrouter MiniMax M3 reasoning enabled -> OpenRouter reasoning shape",
+			name: "openrouter MiniMax M3 reasoning enabled rides portable reasoning",
 			request: {
 				providerId: "openrouter",
 				modelId: "minimax/minimax-m3",
@@ -1610,11 +1594,11 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 				family: "minimax",
 				capabilities: ["reasoning"],
 			},
+			portable: "medium",
 			expect: [
 				{
 					bucket: "openrouter",
-					has: { reasoning: { enabled: true, max_tokens: 19_200 } },
-					lacks: ["thinking", "effort", "reasoningEffort"],
+					lacks: ["thinking", "reasoning", "effort", "reasoningEffort"],
 				},
 				{
 					bucket: "openaiCompatible",
@@ -1646,7 +1630,7 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "vercel MiniMax M3 reasoning enabled -> gateway reasoning shape",
+			name: "vercel MiniMax M3 reasoning enabled rides portable reasoning",
 			request: {
 				providerId: "vercel-ai-gateway",
 				modelId: "minimax/minimax-m3",
@@ -1656,16 +1640,27 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 				family: "minimax",
 				capabilities: ["reasoning"],
 			},
+			portable: "high",
 			expect: [
 				{
 					bucket: "vercel-ai-gateway",
-					has: { reasoning: { enabled: true } },
-					lacks: ["thinking", "effort", "reasoningEffort", "reasoningSummary"],
+					lacks: [
+						"thinking",
+						"reasoning",
+						"effort",
+						"reasoningEffort",
+						"reasoningSummary",
+					],
 				},
 				{
 					bucket: "vercelAiGateway",
-					has: { reasoning: { enabled: true } },
-					lacks: ["thinking", "effort", "reasoningEffort", "reasoningSummary"],
+					lacks: [
+						"thinking",
+						"reasoning",
+						"effort",
+						"reasoningEffort",
+						"reasoningSummary",
+					],
 				},
 			],
 		},
@@ -1704,6 +1699,7 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 				family: "minimax",
 				capabilities: ["reasoning"],
 			},
+			portable: "medium",
 			expect: [
 				{
 					bucket: "vercel-ai-gateway",
@@ -1712,7 +1708,7 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "cline MiniMax M3 reasoning enabled -> gateway reasoning without thinking leak",
+			name: "cline MiniMax M3 reasoning enabled rides portable reasoning without thinking leak",
 			request: {
 				providerId: "cline",
 				modelId: "minimax/minimax-m3",
@@ -1722,11 +1718,17 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 				family: "minimax",
 				capabilities: ["reasoning"],
 			},
+			portable: "high",
 			expect: [
 				{
 					bucket: "cline",
-					has: { reasoning: { enabled: true, effort: "high" } },
-					lacks: ["thinking", "effort", "reasoningEffort", "reasoningSummary"],
+					lacks: [
+						"thinking",
+						"reasoning",
+						"effort",
+						"reasoningEffort",
+						"reasoningSummary",
+					],
 				},
 				{
 					bucket: "openaiCompatible",
@@ -1783,7 +1785,7 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "direct MiniMax M3 reasoning enabled -> thinking.type=adaptive",
+			name: "direct MiniMax M3 reasoning enabled rides portable reasoning",
 			request: {
 				providerId: "minimax",
 				modelId: "MiniMax-M3",
@@ -1794,16 +1796,27 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 				capabilities: ["reasoning"],
 				metadata: MINIMAX_THINKING_ROUTING_METADATA,
 			},
+			portable: "high",
 			expect: [
 				{
 					bucket: "minimax",
-					has: { thinking: { type: "adaptive" } },
-					lacks: ["reasoning", "effort", "reasoningEffort", "reasoningSummary"],
+					lacks: [
+						"thinking",
+						"reasoning",
+						"effort",
+						"reasoningEffort",
+						"reasoningSummary",
+					],
 				},
 				{
 					bucket: "openaiCompatible",
-					has: { thinking: { type: "adaptive" } },
-					lacks: ["reasoning", "effort", "reasoningEffort", "reasoningSummary"],
+					lacks: [
+						"thinking",
+						"reasoning",
+						"effort",
+						"reasoningEffort",
+						"reasoningSummary",
+					],
 				},
 			],
 		},
@@ -1819,6 +1832,7 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 				capabilities: ["reasoning"],
 				metadata: MINIMAX_THINKING_ROUTING_METADATA,
 			},
+			portable: "medium",
 			expect: [
 				{
 					bucket: "minimax",
@@ -1853,19 +1867,24 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 				},
 			],
 		},
-		// Ollama Qwen3: model behavior fact first, documented dynamic fallback second.
+		// Ollama: explicit intent rides the portable option (the patched
+		// ollama-ai-provider-v2 maps it onto the native `think` flag; see
+		// vendors/ollama.wire.test.ts). Unset reasoning sends nothing so the
+		// Ollama server default (auto-thinking for capable models) applies.
 		{
-			name: "ollama metadata reasoningDefaultOn disabled -> think false",
+			name: "ollama metadata reasoningDefaultOn disabled -> portable none",
 			request: {
 				providerId: "ollama",
 				modelId: "local-known-reasoner:latest",
 				reasoning: { enabled: false },
 			},
 			context: { modelMetadata: { reasoningDefaultOn: true } },
+			portable: "none",
 			expect: [
 				{
 					bucket: "ollama",
-					has: { think: false, options: { num_ctx: 32768 } },
+					has: { options: { num_ctx: 32768 } },
+					lacks: ["think"],
 				},
 				{
 					bucket: "openaiCompatible",
@@ -1874,16 +1893,18 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "ollama qwen3 fallback reasoning disabled -> think false",
+			name: "ollama qwen3 fallback reasoning disabled -> portable none",
 			request: {
 				providerId: "ollama",
 				modelId: "qwen3-coder:30b",
 				reasoning: { enabled: false },
 			},
+			portable: "none",
 			expect: [
 				{
 					bucket: "ollama",
-					has: { think: false, options: { num_ctx: 32768 } },
+					has: { options: { num_ctx: 32768 } },
+					lacks: ["think"],
 				},
 				{
 					bucket: "openaiCompatible",
@@ -1892,23 +1913,24 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			],
 		},
 		{
-			name: "ollama qwen3 fallback reasoning enabled -> think true",
+			name: "ollama qwen3 fallback reasoning enabled -> portable medium",
 			request: {
 				providerId: "ollama",
 				modelId: "qwen3-coder:30b",
 				reasoning: { enabled: true },
 			},
+			portable: "medium",
 			expect: [
 				{
 					bucket: "ollama",
-					has: { think: true, options: { num_ctx: 32768 } },
-					lacks: ["reasoningEffort", "reasoning"],
+					has: { options: { num_ctx: 32768 } },
+					lacks: ["think", "reasoningEffort", "reasoning"],
 				},
 				{ bucket: "openaiCompatible", lacks: ["reasoningEffort", "reasoning"] },
 			],
 		},
 		{
-			name: "ollama qwen3 fallback with unset reasoning -> think true",
+			name: "ollama qwen3 fallback with unset reasoning leaves the server default",
 			request: {
 				providerId: "ollama",
 				modelId: "qwen3-coder:30b",
@@ -1916,14 +1938,14 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			expect: [
 				{
 					bucket: "ollama",
-					has: { think: true, options: { num_ctx: 32768 } },
-					lacks: ["reasoningEffort", "reasoning"],
+					has: { options: { num_ctx: 32768 } },
+					lacks: ["think", "reasoningEffort", "reasoning"],
 				},
 				{ bucket: "openaiCompatible", lacks: ["reasoningEffort", "reasoning"] },
 			],
 		},
 		{
-			name: "ollama metadata reasoningDefaultOn with unset reasoning -> think true",
+			name: "ollama metadata reasoningDefaultOn with unset reasoning leaves the server default",
 			request: {
 				providerId: "ollama",
 				modelId: "local-known-reasoner:latest",
@@ -1932,14 +1954,14 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 			expect: [
 				{
 					bucket: "ollama",
-					has: { think: true, options: { num_ctx: 32768 } },
-					lacks: ["reasoningEffort", "reasoning"],
+					has: { options: { num_ctx: 32768 } },
+					lacks: ["think", "reasoningEffort", "reasoning"],
 				},
 				{ bucket: "openaiCompatible", lacks: ["reasoningEffort", "reasoning"] },
 			],
 		},
 		{
-			name: "ollama metadata reasoningDefaultOn beats deepseek family thinking disable",
+			name: "ollama deepseek family disable rides portable none, no thinking leak",
 			request: {
 				providerId: "ollama",
 				modelId: "deepseek-r1:latest",
@@ -1949,11 +1971,12 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 				family: "deepseek",
 				modelMetadata: { reasoningDefaultOn: true },
 			},
+			portable: "none",
 			expect: [
 				{
 					bucket: "ollama",
-					has: { think: false, options: { num_ctx: 32768 } },
-					lacks: ["thinking"],
+					has: { options: { num_ctx: 32768 } },
+					lacks: ["think", "thinking"],
 				},
 				{
 					bucket: "openaiCompatible",
@@ -1969,44 +1992,47 @@ describe("composeAiSdkProviderOptions: family/provider thinking patches", () => 
 				reasoning: { enabled: false },
 			},
 			context: { modelMetadata: { reasoningDefaultOn: false } },
+			portable: "none",
 			expect: [
 				{
 					bucket: "ollama",
-					has: { think: false, options: { num_ctx: 32768 } },
-					lacks: ["reasoningEffort", "reasoning"],
+					has: { options: { num_ctx: 32768 } },
+					lacks: ["think", "reasoningEffort", "reasoning"],
 				},
 				{ bucket: "openaiCompatible", lacks: ["reasoningEffort", "reasoning"] },
 			],
 		},
 		{
-			name: "ollama local model explicit reasoning disabled -> think false",
+			name: "ollama local model explicit reasoning disabled -> portable none",
 			request: {
 				providerId: "ollama",
 				modelId: "llama3.1:8b",
 				reasoning: { enabled: false },
 			},
 			context: { contextWindow: 65536 },
+			portable: "none",
 			expect: [
 				{
 					bucket: "ollama",
-					has: { think: false, options: { num_ctx: 65536 } },
-					lacks: ["reasoningEffort", "reasoning"],
+					has: { options: { num_ctx: 65536 } },
+					lacks: ["think", "reasoningEffort", "reasoning"],
 				},
 				{ bucket: "openaiCompatible", lacks: ["reasoningEffort", "reasoning"] },
 			],
 		},
 		{
-			name: "ollama unregistered deepseek-r1 explicit reasoning enabled -> think true",
+			name: "ollama unregistered deepseek-r1 explicit reasoning enabled -> portable medium",
 			request: {
 				providerId: "ollama",
 				modelId: "deepseek-r1:latest",
 				reasoning: { enabled: true },
 			},
+			portable: "medium",
 			expect: [
 				{
 					bucket: "ollama",
-					has: { think: true, options: { num_ctx: 32768 } },
-					lacks: ["reasoningEffort", "reasoning"],
+					has: { options: { num_ctx: 32768 } },
+					lacks: ["think", "reasoningEffort", "reasoning"],
 				},
 				{ bucket: "openaiCompatible", lacks: ["think", "reasoning"] },
 			],
@@ -2059,45 +2085,53 @@ describe("composeAiSdkProviderOptions: catalog-driven provider codecs", () => {
 	});
 
 	it.each([
+		// Catalog effort/enablement rides portable reasoning (max -> xhigh).
 		[
 			"effort",
 			{ effort: "max" },
 			effortOptions(["low", "medium", "high", "max"]),
-			{ reasoningEffort: "max" },
-		],
-		[
-			"off",
-			{ enabled: false },
-			[{ type: "toggle" }],
-			{ reasoningEffort: "none" },
+			"xhigh",
+			undefined,
 		],
 		[
 			"on",
 			{ enabled: true },
 			[{ type: "toggle" }, ...effortOptions(["low", "medium", "high", "max"])],
-			{ reasoningEffort: "medium" },
+			"medium",
+			undefined,
+		],
+		// Explicit disable and exact budgets keep their native wire shapes:
+		// @ai-sdk/openai-compatible drops the portable "none" on the floor.
+		[
+			"off",
+			{ enabled: false },
+			[{ type: "toggle" }],
+			undefined,
+			{ reasoningEffort: "none" },
 		],
 		[
 			"budget",
 			{ budgetTokens: 4096 },
 			budgetOptions(128, 32_768),
+			undefined,
 			{ thinking: { type: "enabled", budget_tokens: 4096 } },
 		],
-	] as const)("maps Fireworks %s to its supported wire shape", (_, reasoning, reasoningOptions, expected) => {
+	] as const)("maps Fireworks %s to its supported wire shape", (_, reasoning, reasoningOptions, portable, expected) => {
 		const gatewayRequest = makeRequest({
 			providerId: "fireworks",
 			modelId: "accounts/fireworks/models/kimi-k3",
 			reasoning,
 		});
-		const result = composeAiSdkProviderOptions(
-			gatewayRequest,
-			makeContext({
-				providerId: "fireworks",
-				modelId: "accounts/fireworks/models/kimi-k3",
-				reasoningOptions,
-			}),
+		const gatewayContext = makeContext({
+			providerId: "fireworks",
+			modelId: "accounts/fireworks/models/kimi-k3",
+			reasoningOptions,
+		});
+		const result = composeAiSdkProviderOptions(gatewayRequest, gatewayContext);
+		expect(resolvePortableReasoning(gatewayRequest, gatewayContext)).toBe(
+			portable,
 		);
-		if (resolvePortableReasoning(gatewayRequest)) {
+		if (expected === undefined) {
 			expect(result.fireworks).not.toHaveProperty("reasoningEffort");
 			expect(result.fireworks).not.toHaveProperty("thinking");
 			return;
@@ -2286,7 +2320,7 @@ describe("composeAiSdkProviderOptions: provider-specific overlays", () => {
 		}
 	});
 
-	it("keeps Gemini effort out of provider options", () => {
+	it("derives catalog budgets for budget-mode Gemini effort requests", () => {
 		const withEffort = composeAiSdkProviderOptions(
 			makeRequest({
 				providerId: "gemini",
@@ -2302,7 +2336,11 @@ describe("composeAiSdkProviderOptions: provider-specific overlays", () => {
 				],
 			}),
 		);
-		expect(withEffort).not.toHaveProperty("google");
+		// The catalog advertises only budget controls, so the effort request
+		// resolves to a catalog-scaled exact budget with visible thoughts.
+		expect(withEffort.google).toEqual({
+			thinkingConfig: { thinkingBudget: 12_288, includeThoughts: true },
+		});
 
 		const withoutEffort = composeAiSdkProviderOptions(
 			makeRequest({ providerId: "gemini", modelId: "gemini-2.5-flash" }),
@@ -2330,7 +2368,7 @@ describe("composeAiSdkProviderOptions: provider-specific overlays", () => {
 		});
 	});
 
-	it("leaves Gemini level coercion to the AI SDK", () => {
+	it("complements portable Gemini levels with visible thoughts only", () => {
 		const withMinimal = composeAiSdkProviderOptions(
 			makeRequest({
 				providerId: "gemini",
@@ -2343,10 +2381,14 @@ describe("composeAiSdkProviderOptions: provider-specific overlays", () => {
 				reasoningOptions: effortOptions(["low", "high"]),
 			}),
 		);
-		expect(withMinimal).not.toHaveProperty("google");
+		// The level itself rides the portable option; provider options only
+		// request thought visibility, which the AI SDK merges on top.
+		expect(withMinimal.google).toEqual({
+			thinkingConfig: { includeThoughts: true },
+		});
 	});
 
-	it("does not emit a Google reasoning bucket for portable effort", () => {
+	it("derives a catalog budget for budget-mode Google effort requests", () => {
 		const result = composeAiSdkProviderOptions(
 			makeRequest({
 				providerId: "google",
@@ -2363,10 +2405,12 @@ describe("composeAiSdkProviderOptions: provider-specific overlays", () => {
 			}),
 		);
 
-		expect(result).not.toHaveProperty("google");
+		expect(result.google).toEqual({
+			thinkingConfig: { thinkingBudget: 19_660, includeThoughts: true },
+		});
 	});
 
-	it("does not emit Vertex thinkingConfig for portable effort", () => {
+	it("complements portable Vertex Gemini effort with visible thoughts", () => {
 		const result = composeAiSdkProviderOptions(
 			makeRequest({
 				providerId: "vertex",
@@ -2380,7 +2424,9 @@ describe("composeAiSdkProviderOptions: provider-specific overlays", () => {
 			}),
 		);
 
-		expect(result.vertex).toEqual({});
+		expect(result.vertex).toEqual({
+			thinkingConfig: { includeThoughts: true },
+		});
 		expect(result.vertex).not.toHaveProperty("thinking");
 		expect(result.vertex).not.toHaveProperty("effort");
 		expect(result.vertex).not.toHaveProperty("reasoningEffort");
@@ -2475,7 +2521,9 @@ describe("composeAiSdkProviderOptions: provider-specific overlays", () => {
 			}),
 		);
 
-		expect(result.vertex).toEqual({});
+		expect(result.vertex).toEqual({
+			thinkingConfig: { includeThoughts: true },
+		});
 		expect(result.vertex).not.toHaveProperty("thinking");
 		expect(result.vertex).not.toHaveProperty("effort");
 		expect(result.vertex).not.toHaveProperty("reasoningEffort");

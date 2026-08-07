@@ -3,6 +3,7 @@ import { OLLAMA_DEFAULT_CONTEXT_WINDOW } from "../builtins";
 import {
 	getModelReasoningControls,
 	isDeepSeekFamily,
+	isGeminiModel,
 	isGlmModel,
 	isKimiK26Family as isKimiK26FamilyFact,
 	isMiniMaxM3Model,
@@ -114,6 +115,19 @@ function buildGeminiThinkingConfig(input: ProviderOptionBuildInput) {
 			thinkingBudget: budgetTokens,
 			includeThoughts: true,
 		};
+	}
+	// Portable reasoning sets the Gemini thinking level but never requests
+	// thought visibility; without `includeThoughts` the model spends thinking
+	// tokens yet returns no thought parts. The AI SDK merges this provider
+	// option over its portable resolution, so the level is preserved. Vertex
+	// also serves non-Gemini models (e.g. Claude), which must not receive a
+	// Gemini thinkingConfig.
+	if (
+		input.portableReasoning &&
+		input.portableReasoning !== "none" &&
+		isGeminiModel({ request: input.request, context: input.context })
+	) {
+		return { includeThoughts: true };
 	}
 	return undefined;
 }
@@ -297,22 +311,26 @@ const fireworksReasoningRule: ProviderOptionRule = {
 	id: "provider.fireworks.reasoning-budget",
 	phase: "provider-reasoning",
 	description:
-		"Fireworks uses its native thinking object for exact token budgets.",
+		"Fireworks uses its native thinking object for exact token budgets and reasoning_effort 'none' for explicit disable (which @ai-sdk/openai-compatible cannot express portably).",
 	applies: (input) =>
 		input.request.providerId === "fireworks" &&
-		typeof input.request.reasoning?.budgetTokens === "number",
+		(typeof input.request.reasoning?.budgetTokens === "number" ||
+			input.request.reasoning?.enabled === false),
 	suppresses: { genericThinking: true },
 	build: (input) => {
 		const reasoning = input.request.reasoning;
 		return buildProviderAndAliasPatch({
 			providerId: input.request.providerId,
 			providerOptionsKey: input.providerOptionsKey,
-			bucketOptions: {
-				thinking: {
-					type: "enabled",
-					budget_tokens: reasoning?.budgetTokens,
-				},
-			},
+			bucketOptions:
+				typeof reasoning?.budgetTokens === "number"
+					? {
+							thinking: {
+								type: "enabled",
+								budget_tokens: reasoning.budgetTokens,
+							},
+						}
+					: { reasoningEffort: "none" },
 		});
 	},
 };
@@ -337,13 +355,15 @@ const geminiThinkingRule: ProviderOptionRule = {
 	id: "provider.google-gemini.thinking-config",
 	phase: "provider",
 	description:
-		"Google/Gemini/Vertex uses thinkingConfig only for exact token budgets.",
+		"Google/Gemini/Vertex uses thinkingConfig for exact token budgets and to surface thoughts alongside portable reasoning.",
 	suppresses: { genericThinking: true },
 	applies: (input) =>
 		(input.request.providerId === "google" ||
 			input.request.providerId === "gemini" ||
 			input.request.providerId === "vertex") &&
-		typeof input.request.reasoning?.budgetTokens === "number",
+		(typeof input.request.reasoning?.budgetTokens === "number" ||
+			(input.portableReasoning !== undefined &&
+				input.portableReasoning !== "none")),
 	build: (input) => {
 		const providerOptionsName =
 			input.request.providerId === "vertex" ? "vertex" : "google";
