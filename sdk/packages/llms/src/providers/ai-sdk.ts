@@ -1201,6 +1201,11 @@ async function* emitAiSdkEvents(
 				}
 
 				if (part.type === "file") {
+					const video = extractGeneratedVideo(part.file);
+					if (video) {
+						yield { type: "video", ...video };
+						continue;
+					}
 					const image = extractGeneratedImage(part.file);
 					if (image) {
 						yield { type: "image", ...image };
@@ -1384,7 +1389,6 @@ async function* emitAiSdkEvents(
 			yield { type: "image", ...image };
 		}
 	}
-
 	// Prefer stream.usage (has raw cost data) over finish part usage.
 	// stream.usage may be undefined in mocked/test scenarios, fall back to finish part + its providerMetadata.
 	let usageToEmit: unknown;
