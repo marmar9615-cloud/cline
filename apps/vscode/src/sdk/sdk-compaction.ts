@@ -3,8 +3,9 @@
 // Manual context compaction for the VSCode SDK adapter. This mirrors the CLI's
 // apps/cli/src/runtime/interactive/compaction.ts (`compactInteractiveMessages`):
 // it builds a manual-mode compaction `prepareTurn` via the SDK's
-// `createContextCompactionPrepareTurn` and runs it against the current session
-// transcript, returning the compacted working-context sidecar state.
+// `createContextCompactionPrepareTurn` and runs it against the session's
+// working context (the existing sidecar projected over the canonical
+// transcript), returning the new compacted working-context sidecar state.
 //
 // The VSCode coordinator persists that sidecar without replacing the canonical
 // transcript, so the active session and later resumes use compacted working
@@ -14,6 +15,7 @@ import {
 	type CoreSessionConfig,
 	createContextCompactionPrepareTurn,
 	createSessionCompactionState,
+	projectSessionCompactionState,
 	type SessionCompactionState,
 } from "@cline/core"
 import type { Message as SdkMessage, ModelInfo as SdkModelInfo } from "@cline/llms"
@@ -32,8 +34,18 @@ export interface CompactSessionMessagesInput {
 	>
 	/** The active session id (used for telemetry keying). */
 	sessionId: string
-	/** The conversation transcript to compact (SDK message shape). */
+	/** The canonical conversation transcript (SDK message shape). */
 	messages: SdkMessage[]
+	/**
+	 * The session's existing compacted working-context sidecar, if any. When
+	 * it projects cleanly over `messages`, compaction runs on that projection
+	 * — the transcript the model actually receives — instead of re-compacting
+	 * the full canonical history. Canonical can outgrow the model's context
+	 * window by millions of tokens on long sessions, and compacting it from
+	 * scratch produces an over-window result that permanently wedges the
+	 * session (cline/cline#12996).
+	 */
+	compactionState?: SessionCompactionState
 	/**
 	 * Receives the SDK's compaction status notices (started/completed/skipped
 	 * with token + message counters) so the caller can drive progress UI.
@@ -94,13 +106,21 @@ export async function compactSessionMessages(input: CompactSessionMessagesInput)
 		return { compacted: false, messages: input.messages }
 	}
 
+	// Compact the working context — the same transcript every turn sends to
+	// the model — not the raw canonical history. Falls back to canonical when
+	// there is no sidecar or it no longer projects (e.g. rewritten history).
+	const projectedMessages = input.compactionState
+		? projectSessionCompactionState(input.compactionState, input.messages)
+		: undefined
+	const workingMessages = projectedMessages ?? input.messages
+
 	const result = await compact({
 		agentId: "cline-vscode",
 		conversationId: input.sessionId,
 		parentAgentId: null,
 		iteration: 0,
-		messages: input.messages,
-		apiMessages: input.messages,
+		messages: workingMessages,
+		apiMessages: workingMessages,
 		abortSignal: new AbortController().signal,
 		systemPrompt: "",
 		tools: [],
@@ -112,8 +132,12 @@ export async function compactSessionMessages(input: CompactSessionMessagesInput)
 		emitStatusNotice: input.emitStatusNotice,
 	})
 	if (!result) {
-		return { compacted: false, messages: input.messages }
+		return { compacted: false, messages: workingMessages }
 	}
+	// The new sidecar stays keyed to the canonical transcript (same as the
+	// SDK's own re-compaction flow), and a system prompt carried by the prior
+	// sidecar survives unless this compaction rewrote it.
+	const systemPrompt = result.systemPrompt ?? (projectedMessages ? input.compactionState?.system_prompt : undefined)
 	return {
 		compacted: true,
 		messages: result.messages,
@@ -121,7 +145,7 @@ export async function compactSessionMessages(input: CompactSessionMessagesInput)
 			sourceMessages: input.messages,
 			compactedMessages: result.messages,
 			conversationId: input.sessionId,
-			systemPrompt: result.systemPrompt,
+			systemPrompt,
 		}),
 	}
 }

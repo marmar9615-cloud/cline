@@ -4,6 +4,7 @@ import {
 	type ProviderConfig,
 	type ProviderSettings,
 	type ProviderSettingsManager,
+	projectSessionCompactionState,
 	type ReasoningSettings,
 	type SessionCompactionState,
 	toProviderConfig,
@@ -53,7 +54,18 @@ export async function compactInteractiveMessages(input: {
 	config: Config;
 	providerSettingsManager: ProviderSettingsManager;
 	sessionId: string;
+	/** The canonical session transcript. */
 	messages: Message[];
+	/**
+	 * The session's existing compacted working-context sidecar, if any. When
+	 * it projects cleanly over `messages`, compaction runs on that projection
+	 * — the transcript the model actually receives — instead of re-compacting
+	 * the full canonical history. Canonical can outgrow the model's context
+	 * window by millions of tokens on long sessions, and compacting it from
+	 * scratch produces an over-window result that permanently wedges the
+	 * session (cline/cline#12996).
+	 */
+	compactionState?: SessionCompactionState;
 	abortSignal?: AbortSignal;
 }): Promise<{
 	compacted: boolean;
@@ -94,16 +106,22 @@ export async function compactInteractiveMessages(input: {
 	if (!compact) {
 		return { compacted: false, canonicalMessages: input.messages };
 	}
-	// Manual compaction intentionally summarizes the full canonical transcript
-	// instead of reusing a prior sidecar summary, which avoids summary-of-summary
-	// drift across repeated `/compact` calls.
+	// Compact the working context — the same transcript every turn sends to
+	// the model — not the raw canonical history. Summary-of-summary drift is
+	// handled by the agentic strategy itself, which folds the previous
+	// summary message forward instead of re-summarizing it blindly. Falls
+	// back to canonical when there is no sidecar or it no longer projects.
+	const projectedMessages = input.compactionState
+		? projectSessionCompactionState(input.compactionState, input.messages)
+		: undefined;
+	const workingMessages = projectedMessages ?? input.messages;
 	const result = await compact({
 		agentId: "cli",
 		conversationId: input.sessionId,
 		parentAgentId: null,
 		iteration: 0,
-		messages: input.messages,
-		apiMessages: input.messages,
+		messages: workingMessages,
+		apiMessages: workingMessages,
 		abortSignal: input.abortSignal ?? new AbortController().signal,
 		systemPrompt: "",
 		tools: [],
@@ -116,6 +134,12 @@ export async function compactInteractiveMessages(input: {
 	if (!result?.messages) {
 		return { compacted: false, canonicalMessages: input.messages };
 	}
+	// The new sidecar stays keyed to the canonical transcript (same as the
+	// SDK's own re-compaction flow), and a system prompt carried by the prior
+	// sidecar survives unless this compaction rewrote it.
+	const systemPrompt =
+		result.systemPrompt ??
+		(projectedMessages ? input.compactionState?.system_prompt : undefined);
 	return {
 		compacted: true,
 		canonicalMessages: input.messages,
@@ -123,7 +147,7 @@ export async function compactInteractiveMessages(input: {
 			sourceMessages: input.messages,
 			compactedMessages: result.messages,
 			conversationId: input.sessionId,
-			systemPrompt: result.systemPrompt,
+			systemPrompt,
 		}),
 	};
 }

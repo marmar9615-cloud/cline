@@ -211,6 +211,9 @@ export class SdkCompactionCoordinator {
 			await this.options.postStateToWebview()
 			return
 		}
+		// The existing sidecar lets compaction run over the working context the
+		// model actually sees instead of the full canonical history.
+		const compactionState = await sdkHost.readSessionCompactionState?.(sessionId)
 
 		const cwd = await this.options.getWorkspaceRoot()
 		const mode = this.getCurrentMode()
@@ -238,6 +241,7 @@ export class SdkCompactionCoordinator {
 				},
 				sessionId,
 				messages,
+				compactionState,
 				emitStatusNotice: (_message, metadata) => {
 					const parsed = parseCompactionNoticeMetadata(metadata)
 					if (parsed && parsed.status !== "started") {

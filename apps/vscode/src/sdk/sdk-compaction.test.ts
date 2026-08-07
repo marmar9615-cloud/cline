@@ -2,9 +2,11 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 const createContextCompactionPrepareTurn = vi.fn()
 const createSessionCompactionState = vi.fn((input: unknown) => ({ version: 1, input }))
+const projectSessionCompactionState = vi.fn()
 vi.mock("@cline/core", () => ({
 	createContextCompactionPrepareTurn: (...args: unknown[]) => createContextCompactionPrepareTurn(...args),
 	createSessionCompactionState: (input: unknown) => createSessionCompactionState(input),
+	projectSessionCompactionState: (...args: unknown[]) => projectSessionCompactionState(...args),
 }))
 
 vi.mock("@/shared/services/Logger", () => ({
@@ -95,6 +97,76 @@ describe("compactSessionMessages", () => {
 					info: { id: "claude", contextWindow: 400_000 },
 				}),
 			}),
+		)
+	})
+
+	it("compacts the sidecar projection instead of the canonical transcript", async () => {
+		// cline/cline#12996: the canonical history can exceed the model window
+		// by millions of tokens; the working context is what must be compacted.
+		const compact = vi.fn().mockResolvedValue({ messages: [{ role: "user", content: "new summary" }] })
+		createContextCompactionPrepareTurn.mockReturnValueOnce(compact)
+		const canonical = [
+			{ role: "user" as const, content: "huge prefix" },
+			{ role: "assistant" as const, content: "huge reply" },
+			{ role: "user" as const, content: "tail" },
+		]
+		const projected = [
+			{ role: "user" as const, content: "prior summary" },
+			{ role: "user" as const, content: "tail" },
+		]
+		const compactionState = { version: 1, messages: [{ role: "user", content: "prior summary" }] }
+		projectSessionCompactionState.mockReturnValueOnce(projected)
+
+		const result = await compactSessionMessages({
+			config: baseConfig,
+			sessionId: "s1",
+			messages: canonical,
+			compactionState: compactionState as never,
+		})
+
+		expect(projectSessionCompactionState).toHaveBeenCalledWith(compactionState, canonical)
+		expect(compact).toHaveBeenCalledWith(expect.objectContaining({ messages: projected, apiMessages: projected }))
+		// The new sidecar is still keyed to the canonical transcript.
+		expect(createSessionCompactionState).toHaveBeenCalledWith(
+			expect.objectContaining({
+				sourceMessages: canonical,
+				compactedMessages: [{ role: "user", content: "new summary" }],
+			}),
+		)
+		expect(result.compacted).toBe(true)
+	})
+
+	it("falls back to the canonical transcript when the sidecar no longer projects", async () => {
+		const compact = vi.fn().mockResolvedValue({ messages: [{ role: "user", content: "summary" }] })
+		createContextCompactionPrepareTurn.mockReturnValueOnce(compact)
+		const canonical = [{ role: "user" as const, content: "only message" }]
+		projectSessionCompactionState.mockReturnValueOnce(undefined)
+
+		await compactSessionMessages({
+			config: baseConfig,
+			sessionId: "s1",
+			messages: canonical,
+			compactionState: { version: 1, messages: [] } as never,
+		})
+
+		expect(compact).toHaveBeenCalledWith(expect.objectContaining({ messages: canonical, apiMessages: canonical }))
+	})
+
+	it("carries the prior sidecar's system prompt forward when compacting a projection", async () => {
+		const compact = vi.fn().mockResolvedValue({ messages: [{ role: "user", content: "summary" }] })
+		createContextCompactionPrepareTurn.mockReturnValueOnce(compact)
+		const canonical = [{ role: "user" as const, content: "1" }]
+		projectSessionCompactionState.mockReturnValueOnce([{ role: "user" as const, content: "projected" }])
+
+		await compactSessionMessages({
+			config: baseConfig,
+			sessionId: "s1",
+			messages: canonical,
+			compactionState: { version: 1, messages: [], system_prompt: "carried system prompt" } as never,
+		})
+
+		expect(createSessionCompactionState).toHaveBeenCalledWith(
+			expect.objectContaining({ systemPrompt: "carried system prompt" }),
 		)
 	})
 

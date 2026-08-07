@@ -9,6 +9,7 @@ vi.mock("@cline/core", () => ({
 		version: 1,
 		messages: input.compactedMessages,
 	})),
+	projectSessionCompactionState: vi.fn((state: { messages: unknown[] }) => state.messages),
 }))
 
 const mockCreateContextCompactionPrepareTurn = createContextCompactionPrepareTurn as unknown as ReturnType<typeof vi.fn>
@@ -170,6 +171,39 @@ describe("SdkCompactionCoordinator", () => {
 		expect(rows[1].info).toMatchObject({ status: "completed", mode: "manual", messagesBefore: 3, messagesAfter: 1 })
 		expect(rows[1].ts).toBe(rows[0].ts)
 	})
+	it("compacts the projected working context when the session has a sidecar", async () => {
+		// Regression coverage for cline/cline#12996: manual compaction must run
+		// over the working context (sidecar projection), not the full canonical
+		// history, which can exceed the model window by millions of tokens.
+		const activeSession = makeActiveSession()
+		const canonical = [
+			{ role: "user", content: "huge old canonical prefix" },
+			{ role: "assistant", content: "huge old canonical reply" },
+			{ role: "user", content: "new tail" },
+		]
+		const projected = [
+			{ role: "user", content: "prior summary" },
+			{ role: "user", content: "new tail" },
+		]
+		activeSession.sdkHost.readMessages.mockResolvedValueOnce(canonical)
+		activeSession.sdkHost.readSessionCompactionState.mockResolvedValueOnce({
+			version: 1,
+			messages: projected,
+		})
+		const { coordinator } = makeCoordinator({ activeSession })
+		const compact = vi.fn().mockResolvedValue({ messages: [{ role: "user", content: "summary" }] })
+		mockCreateContextCompactionPrepareTurn.mockReturnValueOnce(compact)
+
+		await coordinator.compactTask()
+
+		expect(activeSession.sdkHost.readSessionCompactionState).toHaveBeenCalledWith("old-session")
+		expect(compact).toHaveBeenCalledWith(expect.objectContaining({ messages: projected, apiMessages: projected }))
+		expect(activeSession.sdkHost.updateSessionCompactionState).toHaveBeenCalledWith("old-session", {
+			version: 1,
+			messages: [{ role: "user", content: "summary" }],
+		})
+	})
+
 	it("prefers the SDK's token counters from its status notice for the completed divider", async () => {
 		const activeSession = makeActiveSession()
 		const { coordinator, options } = makeCoordinator({ activeSession })
@@ -461,6 +495,7 @@ function makeSessionHost() {
 		})),
 		readMessages: vi.fn().mockResolvedValue([{ role: "user", content: "1" }]),
 		updateSessionCompactionState: vi.fn().mockResolvedValue({ updated: true }),
+		readSessionCompactionState: vi.fn().mockResolvedValue(undefined),
 		send: vi.fn(),
 		abort: vi.fn().mockResolvedValue(undefined),
 		stop: vi.fn().mockResolvedValue(undefined),

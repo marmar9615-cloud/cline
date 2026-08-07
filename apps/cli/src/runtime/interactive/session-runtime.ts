@@ -716,6 +716,7 @@ export function createInteractiveSessionRuntime(input: {
 				providerSettingsManager: input.providerSettingsManager,
 				sessionId: sourceSessionId,
 				messages,
+				compactionState: await readCompactionState(sourceSessionId),
 				abortSignal: abortController.signal,
 			});
 		} finally {

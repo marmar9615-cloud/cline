@@ -3,8 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	type CoreCompactionContext,
+	createSessionCompactionState,
 	ProviderSettingsManager,
+	projectSessionCompactionState,
 } from "@cline/core";
+import type { Message } from "@cline/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "../../utils/types";
 import {
@@ -229,6 +232,86 @@ describe("compactInteractiveMessages", () => {
 					.join("\n")
 			: String(summaryMessage?.content ?? "");
 		expect(summaryText).toContain(mockSummary);
+	});
+
+	it("compacts the projected working context when a sidecar is provided", async () => {
+		// cline/cline#12996: manual compaction must run over the working
+		// context (existing sidecar projected over canonical), not the full
+		// canonical history, which can exceed the model window by millions of
+		// tokens on long sessions.
+		const canonical: Message[] = [
+			{ role: "user", content: "huge old prefix" },
+			{ role: "assistant", content: "huge old reply" },
+			{ role: "user", content: "new tail message" },
+		];
+		const priorSummary: Message = { role: "user", content: "prior summary" };
+		const sidecar = createSessionCompactionState({
+			sourceMessages: canonical.slice(0, 2),
+			compactedMessages: [priorSummary],
+			conversationId: "sess-compact",
+			systemPrompt: "carried system prompt",
+		});
+		const config = createConfig();
+		const seenTranscripts: Message[][] = [];
+		config.compaction = {
+			compact: (context: CoreCompactionContext) => {
+				seenTranscripts.push(context.messages as Message[]);
+				return { messages: [{ role: "user", content: "fresh summary" }] };
+			},
+		};
+
+		const result = await compactInteractiveMessages({
+			config,
+			providerSettingsManager: createProviderSettingsManager(),
+			sessionId: "sess-compact",
+			messages: canonical,
+			compactionState: sidecar,
+		});
+
+		// The compactor saw the projection (prior summary + canonical tail),
+		// not the huge canonical prefix.
+		expect(seenTranscripts).toEqual([[priorSummary, canonical[2]]]);
+		expect(result.compacted).toBe(true);
+		// The new sidecar is keyed to canonical and projects cleanly over it,
+		// and the prior sidecar's system prompt survives.
+		expect(result.compactionState?.source_message_count).toBe(canonical.length);
+		expect(result.compactionState?.system_prompt).toBe("carried system prompt");
+		expect(
+			result.compactionState &&
+				projectSessionCompactionState(result.compactionState, canonical),
+		).toEqual([{ role: "user", content: "fresh summary" }]);
+	});
+
+	it("falls back to the canonical transcript when the sidecar no longer projects", async () => {
+		const canonical: Message[] = [
+			{ role: "user", content: "message one" },
+			{ role: "assistant", content: "message two" },
+		];
+		// A sidecar keyed to a different history: projection fails.
+		const staleSidecar = createSessionCompactionState({
+			sourceMessages: [{ role: "user", content: "some other history" }],
+			compactedMessages: [{ role: "user", content: "stale summary" }],
+			conversationId: "sess-compact",
+		});
+		const config = createConfig();
+		const seenTranscripts: Message[][] = [];
+		config.compaction = {
+			compact: (context: CoreCompactionContext) => {
+				seenTranscripts.push(context.messages as Message[]);
+				return { messages: [{ role: "user", content: "fresh summary" }] };
+			},
+		};
+
+		const result = await compactInteractiveMessages({
+			config,
+			providerSettingsManager: createProviderSettingsManager(),
+			sessionId: "sess-compact",
+			messages: canonical,
+			compactionState: staleSidecar,
+		});
+
+		expect(seenTranscripts).toEqual([canonical]);
+		expect(result.compacted).toBe(true);
 	});
 
 	it("reports compaction when core returns changed messages with the same count", async () => {

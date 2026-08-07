@@ -41,6 +41,8 @@ export interface SdkSessionHost {
 	 */
 	readLiveMessages?(sessionId: string): Promise<SdkInitialMessages>
 	updateSessionCompactionState?(sessionId: string, state: SessionCompactionState): Promise<{ updated: boolean }>
+	/** Reads the session's compacted working-context sidecar, if one exists. */
+	readSessionCompactionState?(sessionId: string): Promise<SessionCompactionState | undefined>
 	restore(input: RestoreInput): Promise<RestoreResult>
 	update(
 		sessionId: string,

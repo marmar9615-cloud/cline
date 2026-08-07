@@ -662,9 +662,12 @@ export function createCompactionStateAwarePrepareTurn(input: {
 			: undefined;
 		if (existingState && projectedMessages) {
 			// Re-compaction intentionally starts from the compacted projection plus
-			// canonical tail. This keeps automatic turns bounded without rebuilding a
-			// full-transcript summary every turn; manual `/compact` is the path for a
-			// fresh summary from canonical history.
+			// canonical tail. This keeps every compaction bounded by the working
+			// context instead of the ever-growing canonical history; manual
+			// `/compact` follows the same rule at its call sites (the canonical
+			// transcript can exceed the model window by millions of tokens, so a
+			// "fresh summary from canonical" is not generally computable —
+			// cline/cline#12996).
 			const result = input.compact
 				? await input.compact({
 						...context,
