@@ -374,6 +374,25 @@ describe("format helpers", () => {
 		).toBe("first (+2 more)");
 		expect(formatToolOutput(null)).toBe("");
 	});
+
+	it("summarizes MCP CallToolResult outputs using their text content", () => {
+		expect(
+			formatToolOutput({
+				content: [{ type: "text", text: "memory contents\nsecond line" }],
+			}),
+		).toBe("memory contents second line");
+		expect(
+			formatToolOutput({
+				content: [
+					{ type: "text", text: "a".repeat(200) },
+					{ type: "image", data: "...", mimeType: "image/png" },
+				],
+				isError: false,
+			}),
+		).toBe(`${"a".repeat(97)}...`);
+		// Objects without extractable MCP content still fall back to JSON.
+		expect(formatToolOutput({ ok: true })).toBe('{"ok":true}');
+	});
 });
 
 describe("hook payload validation and audit logging", () => {

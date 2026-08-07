@@ -346,7 +346,33 @@ export function formatToolOutput(output: unknown): string {
 		return `${results[0]} (+${results.length - 1} more)`;
 	}
 
+	const mcpText = extractMcpTextParts(output);
+	if (mcpText !== undefined) {
+		return truncate(mcpText, 100);
+	}
+
 	return truncate(JSON.stringify(output), 100);
+}
+
+// MCP tools return the CallToolResult shape {content: [{type, text?}, ...]};
+// summarize its readable parts instead of stringifying the whole object.
+function extractMcpTextParts(output: unknown): string | undefined {
+	if (!isRecord(output) || !Array.isArray(output.content)) {
+		return undefined;
+	}
+	const parts = output.content
+		.map((part: unknown) => {
+			if (!isRecord(part)) return "";
+			if (part.type === "text" && typeof part.text === "string") {
+				return part.text;
+			}
+			if (part.type === "image") return "[image]";
+			if (part.type === "audio") return "[audio]";
+			return "";
+		})
+		.filter((s): s is string => s.length > 0);
+	if (parts.length === 0) return undefined;
+	return parts.join(" ");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

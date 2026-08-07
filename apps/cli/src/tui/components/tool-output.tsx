@@ -5,6 +5,7 @@ import { makeUnifiedDiff } from "../utils/diff";
 import { getSyntaxStyle } from "../utils/syntax-style";
 import { getToolErrorPresentation } from "../utils/tool-errors";
 import {
+	buildCollapsedPreview,
 	detectLanguage,
 	extractFullOutputText,
 	parseApplyPatchInput,
@@ -14,6 +15,7 @@ import {
 } from "../utils/tool-parsing";
 
 const MAX_COLLAPSED_LINES = 5;
+const MAX_COLLAPSED_CHARS = 600;
 const RESULT = "\u23bf";
 
 export interface ToolOutputProps {
@@ -252,16 +254,15 @@ function ApplyPatchOutput(props: {
 function GenericOutput(props: { outputSummary: string; fullText?: string }) {
 	const [expanded, setExpanded] = useState(false);
 	const displayText = props.fullText || props.outputSummary;
-	const lines = displayText.split("\n");
-	const isLong = lines.length > MAX_COLLAPSED_LINES;
+	const { isLong, text: collapsedText } = buildCollapsedPreview(
+		displayText,
+		MAX_COLLAPSED_LINES,
+		MAX_COLLAPSED_CHARS,
+	);
 
 	if (!displayText.trim()) return null;
 
 	if (!expanded) {
-		const collapsedText = isLong
-			? `${lines.slice(0, MAX_COLLAPSED_LINES).join("\n")}\n... ${lines.length - MAX_COLLAPSED_LINES} more lines`
-			: displayText;
-
 		return (
 			<box
 				flexDirection="column"

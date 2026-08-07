@@ -185,6 +185,35 @@ export function parseSpawnAgentInput(
 	return { task: input.task };
 }
 
+// Extracts readable text from the MCP CallToolResult shape:
+// {content: [{type: "text", text: "..."}, ...], isError?, structuredContent?}.
+// Without this, MCP outputs fall through to JSON.stringify, which escapes
+// newlines into one giant line that floods the terminal (see issue #13038).
+function extractMcpContentText(raw: unknown): string | undefined {
+	if (!isRecord(raw)) return undefined;
+	if (!Array.isArray(raw.content)) return undefined;
+
+	const parts: string[] = [];
+	for (const part of raw.content) {
+		if (!isRecord(part)) continue;
+		if (part.type === "text" && typeof part.text === "string") {
+			parts.push(part.text);
+		} else if (part.type === "image") {
+			parts.push("[image]");
+		} else if (part.type === "audio") {
+			parts.push("[audio]");
+		} else if (
+			part.type === "resource" &&
+			isRecord(part.resource) &&
+			typeof part.resource.text === "string"
+		) {
+			parts.push(part.resource.text);
+		}
+	}
+	if (parts.length === 0) return undefined;
+	return parts.join("\n");
+}
+
 export function extractFullOutputText(raw: unknown): string | undefined {
 	if (raw === null || raw === undefined) return undefined;
 	if (typeof raw === "string") return raw;
@@ -213,6 +242,8 @@ export function extractFullOutputText(raw: unknown): string | undefined {
 	}
 
 	if (typeof raw === "object") {
+		const mcpText = extractMcpContentText(raw);
+		if (mcpText !== undefined) return mcpText;
 		try {
 			return JSON.stringify(raw, null, 2);
 		} catch {
@@ -221,6 +252,36 @@ export function extractFullOutputText(raw: unknown): string | undefined {
 	}
 
 	return String(raw);
+}
+
+export interface CollapsedPreview {
+	isLong: boolean;
+	text: string;
+}
+
+// Collapse threshold counts characters in addition to logical lines: outputs
+// without newlines (e.g. stringified JSON) would otherwise never collapse and
+// instead word-wrap across dozens of terminal rows.
+export function buildCollapsedPreview(
+	text: string,
+	maxLines: number,
+	maxChars: number,
+): CollapsedPreview {
+	const lines = text.split("\n");
+	const isLong = lines.length > maxLines || text.length > maxChars;
+	if (!isLong) return { isLong: false, text };
+
+	let preview = lines.slice(0, maxLines).join("\n");
+	if (preview.length > maxChars) {
+		preview = preview.slice(0, maxChars).trimEnd();
+	}
+
+	const hiddenLines = lines.length - maxLines;
+	const suffix =
+		hiddenLines > 0
+			? `... ${hiddenLines} more line${hiddenLines === 1 ? "" : "s"}`
+			: `... ${text.length - preview.length} more chars`;
+	return { isLong: true, text: `${preview}\n${suffix}` };
 }
 
 export interface AskQuestionInfo {
